@@ -3,7 +3,7 @@
 # 注意：25.12 起包管理器从 opkg 改为 apk
 
 # ===== 修改默认后台 IP =====
-sed -i 's/192.168.1.1/192.168.2.1/g' package/base-files/files/bin/config_generate
+sed -i 's/192.168.1.1/192.168.8.1/g' package/base-files/files/bin/config_generate
 
 # ===== 修改默认主机名 =====
 sed -i 's/OpenWrt/MyRouter/g' package/base-files/files/bin/config_generate
