@@ -1,0 +1,144 @@
+name: Build OpenWrt 25.12.2 x86_64
+
+on:
+  workflow_dispatch:
+    inputs:
+      ssh:
+        description: '开启 SSH 调试（可手动 menuconfig）'
+        required: false
+        default: 'false'
+
+env:
+  REPO_URL: https://github.com/openwrt/openwrt
+  REPO_TAG: v25.12.2
+  CONFIG_FILE: .config
+  DIY_SCRIPT: diy.sh
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 480
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 初始化编译环境
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo rm -rf /etc/apt/sources.list.d/* \
+            /usr/share/dotnet /usr/local/lib/android \
+            /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo apt-get update
+          sudo apt-get install -y \
+            ack antlr3 asciidoc autoconf automake autopoint binutils \
+            bison build-essential bzip2 ccache cmake cpio curl \
+            device-tree-compiler fastjar flex gawk gettext \
+            gcc-multilib g++-multilib git gperf haveged help2man \
+            intltool libc6-dev-i386 libelf-dev libfuse-dev \
+            libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev \
+            libmpfr-dev libncurses5-dev libncursesw5-dev \
+            libpython3-dev libreadline-dev libssl-dev libtool \
+            lrzsz mkisofs msmtp ninja-build p7zip p7zip-full \
+            patch pkgconf python3 python3-pyelftools \
+            python3-setuptools qemu-utils rsync scons \
+            squashfs-tools subversion swig texinfo uglifyjs \
+            upx-ucl unzip vim wget xmlto xxd zlib1g-dev
+          sudo timedatectl set-timezone "$TZ"
+          sudo mkdir -p /workdir
+          sudo chown "$USER:$GROUPS" /workdir
+
+      - name: 克隆 OpenWrt 25.12.2 源码
+        working-directory: /workdir
+        run: |
+          git clone "$REPO_URL" openwrt --depth=1 --branch "$REPO_TAG"
+          ln -sf /workdir/openwrt "$GITHUB_WORKSPACE/openwrt"
+
+      - name: 更新 feeds
+        working-directory: /workdir/openwrt
+        run: |
+          ./scripts/feeds update -a
+
+      - name: 执行自定义脚本（添加 OpenClash 源等）
+        run: |
+          chmod +x "$GITHUB_WORKSPACE/$DIY_SCRIPT"
+          cd /workdir/openwrt
+          "$GITHUB_WORKSPACE/$DIY_SCRIPT"
+
+      - name: 安装 feeds
+        working-directory: /workdir/openwrt
+        run: |
+          ./scripts/feeds install -a
+
+      - name: 加载 .config 配置
+        run: |
+          cp "$GITHUB_WORKSPACE/$CONFIG_FILE" /workdir/openwrt/.config
+          cd /workdir/openwrt
+          make defconfig
+
+      - name: SSH 调试（可选）
+        uses: mxschmitt/action-tmate@v3
+        if: github.event.inputs.ssh == 'true'
+
+      - name: 下载编译依赖包
+        working-directory: /workdir/openwrt
+        run: |
+          make download -j8
+          # 删除下载失败的小文件
+          find dl -size -1024c -exec rm -f {} \;
+
+      - name: 编译固件
+        working-directory: /workdir/openwrt
+        run: |
+          echo "使用 $(nproc) 核心并行编译..."
+          make -j$(nproc) || make -j1 V=s
+          echo "BUILD_STATUS=success" >> "$GITHUB_ENV"
+          echo "FILE_DATE=$(date +'%Y%m%d%H%M')" >> "$GITHUB_ENV"
+
+      - name: 整理固件文件
+        if: env.BUILD_STATUS == 'success'
+        run: |
+          cd /workdir/openwrt/bin/targets/x86/64
+          # 只保留固件镜像，删除 packages 目录
+          rm -rf packages
+          ls -lh
+          echo "FIRMWARE_PATH=$PWD" >> "$GITHUB_ENV"
+
+      - name: 上传固件到 Artifacts
+        uses: actions/upload-artifact@v4
+        if: env.BUILD_STATUS == 'success'
+        with:
+          name: OpenWrt-25.12.2-x86_64-${{ env.FILE_DATE }}
+          path: ${{ env.FIRMWARE_PATH }}
+          retention-days: 7
+
+      - name: 发布到 GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: env.BUILD_STATUS == 'success'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: openwrt-25.12.2-${{ env.FILE_DATE }}
+          name: OpenWrt 25.12.2 x86_64 ${{ env.FILE_DATE }}
+          body: |
+            ## OpenWrt 25.12.2 x86_64 固件
+
+            | 项目 | 内容 |
+            |------|------|
+            | 版本 | v25.12.2 |
+            | 架构 | x86_64 |
+            | 内核 | Linux 6.12.x |
+            | 编译时间 | ${{ env.FILE_DATE }} |
+            | 预装插件 | OpenClash、AdGuard Home |
+
+            ### ⚠️ 注意
+            - 25.12 起包管理器改为 **apk**，命令由 `opkg install` 改为 `apk add`
+            - 默认后台地址：**192.168.2.1**
+            - EFI 和 Legacy BIOS 均支持
+
+            ### 刷写说明
+            - 全新安装：使用 `combined-efi.img.gz`（EFI）或 `combined.img.gz`（Legacy）
+            - 升级：使用 `sysupgrade.img.gz`
+          files: ${{ env.FIRMWARE_PATH }}/*
