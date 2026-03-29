@@ -1,5 +1,5 @@
 name: Build OpenWrt 25.12.2 x86_64
-
+ 
 on:
   workflow_dispatch:
     inputs:
@@ -7,23 +7,23 @@ on:
         description: '开启 SSH 调试（可手动 menuconfig）'
         required: false
         default: 'false'
-
+ 
 env:
   REPO_URL: https://github.com/openwrt/openwrt
   REPO_TAG: v25.12.2
   CONFIG_FILE: .config
   DIY_SCRIPT: diy.sh
   TZ: Asia/Shanghai
-
+ 
 jobs:
   build:
     runs-on: ubuntu-22.04
     timeout-minutes: 480
-
+ 
     steps:
       - name: 检出仓库
         uses: actions/checkout@v4
-
+ 
       - name: 初始化编译环境
         env:
           DEBIAN_FRONTEND: noninteractive
@@ -49,54 +49,74 @@ jobs:
           sudo timedatectl set-timezone "$TZ"
           sudo mkdir -p /workdir
           sudo chown "$USER:$GROUPS" /workdir
-
+ 
       - name: 克隆 OpenWrt 25.12.2 源码
         working-directory: /workdir
         run: |
           git clone "$REPO_URL" openwrt --depth=1 --branch "$REPO_TAG"
           ln -sf /workdir/openwrt "$GITHUB_WORKSPACE/openwrt"
-
+ 
       - name: 更新 feeds
         working-directory: /workdir/openwrt
         run: |
           ./scripts/feeds update -a
-
+ 
       - name: 执行自定义脚本（添加 OpenClash 源等）
         run: |
           chmod +x "$GITHUB_WORKSPACE/$DIY_SCRIPT"
           cd /workdir/openwrt
           "$GITHUB_WORKSPACE/$DIY_SCRIPT"
-
+ 
       - name: 安装 feeds
         working-directory: /workdir/openwrt
         run: |
           ./scripts/feeds install -a
-
+ 
       - name: 加载 .config 配置
         run: |
           cp "$GITHUB_WORKSPACE/$CONFIG_FILE" /workdir/openwrt/.config
           cd /workdir/openwrt
           make defconfig
-
+ 
       - name: SSH 调试（可选）
         uses: mxschmitt/action-tmate@v3
         if: github.event.inputs.ssh == 'true'
-
+ 
+      - name: 修复 Rust 在 CI 环境下的编译问题
+        working-directory: /workdir/openwrt
+        run: |
+          # 问题根因：GitHub Actions 会自动设置 CI=true，
+          # 导致 rustc bootstrap 拒绝使用 llvm.download-ci-llvm=true
+          # 解决方案1：取消 CI 环境变量（写入后续步骤均生效）
+          echo "CI=" >> "$GITHUB_ENV"
+ 
+          # 解决方案2（备用）：等 feeds 解压出 rust Makefile 后，
+          # 用 sed 把 llvm.download-ci-llvm 改为 if-unchanged，
+          # 同时把源码目录 git init（'if-unchanged' 要求 git 仓库）
+          RUST_MK="feeds/packages/lang/rust/Makefile"
+          if [ -f "$RUST_MK" ]; then
+            # 将 rustc 源码目录打上 git 标记，使 if-unchanged 可用
+            sed -i 's|download-ci-llvm = true|download-ci-llvm = if-unchanged|g' \
+              build_dir/*/host/rustc-*/config.toml 2>/dev/null || true
+          fi
+ 
       - name: 下载编译依赖包
         working-directory: /workdir/openwrt
         run: |
           make download -j8
           # 删除下载失败的小文件
           find dl -size -1024c -exec rm -f {} \;
-
+ 
       - name: 编译固件
         working-directory: /workdir/openwrt
+        env:
+          CI: ""   # 双重保险：确保 Rust bootstrap 不认为处于 CI 环境
         run: |
           echo "使用 $(nproc) 核心并行编译..."
           make -j$(nproc) || make -j1 V=s
           echo "BUILD_STATUS=success" >> "$GITHUB_ENV"
           echo "FILE_DATE=$(date +'%Y%m%d%H%M')" >> "$GITHUB_ENV"
-
+ 
       - name: 整理固件文件
         if: env.BUILD_STATUS == 'success'
         run: |
@@ -105,7 +125,7 @@ jobs:
           rm -rf packages
           ls -lh
           echo "FIRMWARE_PATH=$PWD" >> "$GITHUB_ENV"
-
+ 
       - name: 上传固件到 Artifacts
         uses: actions/upload-artifact@v4
         if: env.BUILD_STATUS == 'success'
@@ -113,7 +133,7 @@ jobs:
           name: OpenWrt-25.12.2-x86_64-${{ env.FILE_DATE }}
           path: ${{ env.FIRMWARE_PATH }}
           retention-days: 7
-
+ 
       - name: 发布到 GitHub Release
         uses: softprops/action-gh-release@v2
         if: env.BUILD_STATUS == 'success'
@@ -124,7 +144,7 @@ jobs:
           name: OpenWrt 25.12.2 x86_64 ${{ env.FILE_DATE }}
           body: |
             ## OpenWrt 25.12.2 x86_64 固件
-
+ 
             | 项目 | 内容 |
             |------|------|
             | 版本 | v25.12.2 |
@@ -132,12 +152,12 @@ jobs:
             | 内核 | Linux 6.12.x |
             | 编译时间 | ${{ env.FILE_DATE }} |
             | 预装插件 | OpenClash、AdGuard Home |
-
+ 
             ### ⚠️ 注意
             - 25.12 起包管理器改为 **apk**，命令由 `opkg install` 改为 `apk add`
             - 默认后台地址：**192.168.2.1**
             - EFI 和 Legacy BIOS 均支持
-
+ 
             ### 刷写说明
             - 全新安装：使用 `combined-efi.img.gz`（EFI）或 `combined.img.gz`（Legacy）
             - 升级：使用 `sysupgrade.img.gz`
